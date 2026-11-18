@@ -1,0 +1,33 @@
+{
+  "name": "levitum",
+  "description": "LEVITUM wiki tooling for Claude Code",
+  "owner": {
+    "name": "LEVITUM e.V."
+  },
+  "plugins": [
+    {
+      "name": "leviwiki",
+      "displayName": "LeviWiki",
+      "version": "1.1.16",
+      "source": "./",
+      "description": "The wiki-search skill (answer questions from the wiki), the wiki-builder skill (capture, and migration of many sources into many pages, splits and merges) with its wiki-cold-reader, wiki-coverage-checker and wiki-source-reader agents, the wiki-maintenance skill (issues, restructure), plus the hosted MCP gateway (search, read, publish to wiki.levitum.de)",
+      "skills": ["./skills/wiki-search", "./skills/wiki-builder", "./skills/wiki-maintenance"],
+      "agents": ["./agents/wiki-cold-reader.md", "./agents/wiki-coverage-checker.md", "./agents/wiki-source-reader.md"],
+      "mcpServers": {
+        "leviwiki": {
+          "type": "http",
+          "url": "${user_config.mcp_url}",
+          "headers": { "X-Leviwiki-Plugin-Version": "1.1.16" }
+        }
+      },
+      "userConfig": {
+        "mcp_url": {
+          "type": "string",
+          "title": "MCP gateway URL",
+          "description": "The gateway address ending in /mcp, e.g. https://<gateway-host>/mcp. The /enroll page shows it once you have saved a token",
+          "required": true
+        }
+      }
+    }
+  ]
+}
