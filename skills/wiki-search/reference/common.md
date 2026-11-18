@@ -58,9 +58,9 @@ Reading the results, by `source`:
 
 ## On Claude Desktop or claude.ai
 
-- The wiki tools are the same there. Each skill is its own zip, so a skill can't count on another skill's files; this file is in every zip.
+- The wiki tools are the same there. The skills come as one plugin zip (Customize → Plugins → Add → Upload plugin), so all skills are installed together (still, a skill points to another by name, not by file path); the agents load only in Cowork and Claude Code, not in chat.
 - Not tested there: a command that PUTs bytes, files on the user's computer (`~/.leviwiki/`), and the plugin agent `leviwiki:wiki-cold-reader` (often missing, with no Agent tool). If you can't do something, say so, keep going in the chat (show a draft or keep a proposal in the conversation) and, for a file, suggest the Claude Code or laptop install.
 
 ## Skills version
 
-If this skill's description ends in "(skills vX.Y.Z)" (an upload from the `/enroll` page, in Claude Desktop or claude.ai) and the LEVITUM gateway's instructions name a newer skills version, tell the user once: download the new zip from the `/enroll` page, delete this skill under Customize → Skills and upload the new one. No version in the description (a plugin install): ignore this.
+If this skill's description ends in "(skills vX.Y.Z)" (the plugin zip from the `/enroll` page, in Claude Desktop, claude.ai or Cowork) and the LEVITUM gateway's instructions name a newer skills version, tell the user once: download the new zip from the `/enroll` page, delete the old plugin under Customize → Plugins and upload the new zip. No version in the description (a plugin install): ignore this.
