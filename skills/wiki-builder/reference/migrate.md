@@ -48,7 +48,7 @@ script"). Say which fallback you use.
    **The main session never reads source files or all of `units.yaml`:**
    readers return units, and the script's views (`--subjects`, `--conflicts`,
    `--units-for <page>`) show you what you need. **You write the ledger with
-   `scripts/ledger.mjs`** (add-units, add-decision, set-policy, set-fate, add-sweep, upsert-page,
+   `scripts/ledger.mjs`** (init, add-source, set-source-verdict, add-units, set-unit-verdict, add-decision, set-policy, set-fate, add-sweep, upsert-page, add-review,
    set-phase, note; migrate-ledger.md), never with string edits of the YAML: it appends or updates
    and checks in one step, and refuses a change that would add a problem. Your own notes and
    where to continue after a compaction or a usage-limit stop go in `state.yaml` `notes:` and
@@ -117,7 +117,7 @@ loading the structure, the search recipe, the skills-version note) is in
    SKILL.md Step 8b, "Retiring a page", says.
 2. `get_wiki_structure` once; later calls `rules: false`.
 3. Job name (a short slug) and folder `~/.leviwiki/migrate/<job>/`. New job:
-   `mkdir -p -m 700` it and create the files (migrate-ledger.md); the script
+   `ledger.mjs ~/.leviwiki/migrate/<job> init` (the folder and `drafts/` at mode 700, the empty ledger files at 600; no `mkdir` by hand:); the script
    fails a folder that others can read. Existing job: read `state.yaml` and
    continue at its `phase`; tell the human where you are. The script is
    `scripts/check-ledger.mjs` in this skill's folder (next to SKILL.md).
@@ -182,7 +182,9 @@ subject and an open per hit. Result shapes of the server tools are in "Result sh
 file; each step below says what to do when a tool is missing (an older server).
 
 1. **Topics.** Group the units' subjects (after `--subjects`: normalise first) into **at most 15
-   topics**, plus one per topic the human named at M1. Every subject sits under one topic.
+   topics**, plus one per topic the human named at M1. Every subject sits under one topic. **A topic is a
+   group of subjects, not a query**: each topic has
+   2-3 queries, and the `topic` of its sweep records is the group's name.
 2. **Structure first.** `get_wiki_structure` (already loaded) maps each topic to its Area and the
    books and chapters that may hold it; then `list_pages` per mapped book or chapter (`bookId` /
    `chapterId`; no `withTags` unless the type tag decides something). Every page becomes a
@@ -195,7 +197,9 @@ file; each step below says what to do when a tool is missing (an older server).
    rule a page out; no "why" unless it was a top-5 hit.
 4. **Search second, for what lives elsewhere** (reader `sweep` mode, `model: "haiku"`; at most 3
    reader calls at once): 2-3 queries per topic, one English sentence plus keyword variants,
-   in **one `sweep_wiki` call** (up to 15 queries) with `known` = `check-ledger.mjs <job> --known`.
+   in **one `sweep_wiki` call** (up to 15 queries) with `known` = `check-ledger.mjs <job> --known`. **Every query has a
+   distinct `key`** (the call fails without one; use `<topic>-1`, `<topic>-2`): `sweep_wiki {queries: [{key: "pcu-1", query: "How is the PCU connected to the flight controller?", keywords: ["PCU", "Power Control Unit"]}, {key: "pcu-2", query: "PCU bring-up test steps"}], limit: 20, known: [9002, 31]}`;
+   the result's `ranks` is keyed by those `key`s.
    Run it **unscoped** (a `books` filter drops OneDrive hits, and those are the point). `sweep_wiki` returns wiki pages and OneDrive files, **never GitHub hits**.
    Without `sweep_wiki`: `search_wiki` calls, at most 3 at once. New ids get rows and triage; a
    query named in `errors` is retried once with `search_wiki`, else recorded as `failed`. A result
@@ -207,13 +211,17 @@ file; each step below says what to do when a tool is missing (an older server).
    store (`repeat_why`). Record each as a `sweep.yaml` record with `ranks`.
    **Repository files:** after the sweep, **one unscoped `search_wiki` per topic** (the topic's best query, `limit: 20`) looks for GitHub hits (`sweep_wiki` returns none). It is recorded as its own sweep record `via: search_wiki` whose GitHub ranks are `owner/repo:path`, each with a `pages.yaml` row (`ref: "owner/repo:path"`, `kind: github`).
 5. **Digest** (reader `digest` mode, Sonnet): every `candidate` is opened **once**; the reader
-   writes its headings, a 3-5 line digest and the topics it matches. A page with a row is opened
+   writes its headings, a 3-5 line digest, the topics it matches **and its `mentions`**: it is given the job's unit list
+   (`check-ledger.mjs <job> --subjects` shows subjects; the units exist from M3) and records, per page, where the page
+   answers (an open question a unit settles), contradicts, is made stale by, or only needs a link to a unit:
+   `mentions: [{unit, kind: answers|contradicts|stale|link, quote: "short page quote"}]`, `[]` when none. A page with a row is opened
    again only when its `revision` (from `list_pages` or a search hit; with the keyword fallback,
    which has no `revision_count`, its `updated_at`) changed.
 6. **Compare** (reader `compare` mode, Sonnet), per topic, on the digested same-topic pages: the
    digest and the matching sections only. It classes each unit **`covered#<section>`**, `partly`,
    `new` or `conflict`. **Cost guard:** more than 15 same-topic pages for a topic: only the sections
-   whose headings match the units' subjects are compared. **There is no list for the human to pick
+   whose headings match the units' subjects are compared. **You decide which digested pages need no unit-by-unit
+   compare** (a page that holds none of the units): record `compare: skipped` and `compare_reason` (6 words or more, no placeholder) on its row once its mentions are recorded; **never ask the human to approve skipping** (a skipped batch hid a conflict once). **There is no list for the human to pick
    from.** What reaches the human: the **conflicts** (Step M5, both values, the page's revision
    and last-reviewed) and the **new units that touch a "needs my ok" policy** (such a unit has
    `needs_ok: true` and is placed only with `confirmed`). A `covered` unit becomes `link-only`
@@ -222,9 +230,12 @@ file; each step below says what to do when a tool is missing (an older server).
    row (`kind: wiki`, `page_id`, the revision as `version`, `added_by: sweep`) and is decomposed, so its own content is accounted for
    (every unit placed, link-only or dropped with the human's decision), or the human decides about that page (`edits_pages: [id]` in a decision: the page may be archived or rewritten without decomposing it; a compare-conflict decision's `pages` never counts); a
    no-ai page can only have the decision. The script checks this from `plan` on: plan rows alone never count.
-7. **`mentions`** (a page that only refers to a topic, found while digesting): the **link list**,
-   `handling: back-link` or `correction` (handled at M9 step 5); noted in the page's `digest`
-   and `topics`, not rewritten here.
+7. **`mentions` are handled before the plan** (the checker enforces it from `plan` on): a **`contradicts`** mention
+   is a conflict for the human: a standalone question in the Step M5 batch (the unit paraphrased, the page's title and revision,
+   what the page says, the options) unless a decision already covers it; an **`answers`**, **`stale`** or **`link`** mention
+   makes the page an `update` in the plan (an edit that answers the question, corrects the statement or adds the link;
+   `append_only: true` when it only adds), or the human declines it in a decision with `declines_mentions: [page id]`. A page the plan edits is
+   compared or has mentions, never `declined`. The remaining back-links are also fixed at M9 step 5.
 8. **OneDrive and GitHub hits.** A OneDrive file is opened through `read_resource` with the
    hit's **`ref`** (`driveId:itemId`; the URI form is the connector's: use what its tool
    description says). Until the server returns `ref`, look the file up by name with
@@ -313,6 +324,7 @@ conflict has such a decision (an exempt case: units merged into one kept unit). 
 page**. A replaced decision record keeps `status:deprecated` on its old page.
 Show the **inferred** units to be placed and the **plan**-state ones; each
 accepted one gets a decision (`confirmed: <id>` / `decision: <id>` on the unit).
+The **`contradicts` mentions** (pages.yaml `mentions`, Step M3b step 7) go into the same batch, each as its own standalone question (open question with `units: [uNNN]` and `pages: [id]`; the answer is a decision with the same `units`).
 The **conflicts the compare found** (pages.yaml `compared: {uNNN: conflict}`; the decision lists the unit, `units: [uNNN]`, or names its subject together with the page, `subject` + `pages: [id]`; for an OneDrive or repository row the `ref`) and the **new units that touch a "needs my ok" policy** (`needs_ok: true`) are in the same batch; a conflict with a wiki page shows the page's revision and last-reviewed next to the source's version, and the units concerned get their decision before any draft (the script refuses the draft otherwise).
 
 **Questions stand alone, in one batch per round.** Each question is written so the human can answer it
@@ -332,7 +344,9 @@ Related or a **Sources line with the exact versions** (a commit link, a file
 and its date, a page revision); never copy volatile values, link them.
 Links to another new page are `ledger:<key>` until it has an id. A fact from a
 `plan`-state unit says it is planned. Anything the page needs that no unit
-holds is a **question** for the human, in one batch, not text. **If two units disagree
+holds is a **question** for the human, in one batch, not text. **A `TODO` line in text carried over from an existing page
+becomes `Open question: …`** (the draft check refuses `TODO`, `TBD` and the like, and stays that way). **A SharePoint or OneDrive link
+comes from a search or read result's `webUrl` (the inventory row's `url`), never from a folder path pattern**; the coverage checker flags a link not traceable to a row and the script warns. **If two units disagree
 while you draft** (or the draft would need one value where two exist), stop: append both as
 units with one subject, set `phase: reconcile` and go back to Step M5. Never smooth a
 conflict over, never pick the value yourself. Cold read
@@ -340,10 +354,12 @@ conflict over, never pick the value yourself. Cold read
 
 ## Step M7 — Verify
 Per page, until clean:
-1. **Coverage:** call `leviwiki:wiki-coverage-checker` with the draft and the
-   output of `check-ledger.mjs <job> --units-for <page key>` (the page's units
-   and the KNOWN EXCLUDED list), nothing else: never the sources, never the
-   conversation. Handling its answer: [migrate-coverage.md](migrate-coverage.md).
+1. **Coverage:** call `leviwiki:wiki-coverage-checker` with the output of
+   `check-ledger.mjs <job> --bundle <page key>` pasted into the prompt (the plan row, the draft and the page's units
+   with the KNOWN EXCLUDED list), nothing else: never the sources, never the
+   conversation. **The agents cannot read files**, so the draft always comes inline.
+   For a **new page over about 40 lines** also call `leviwiki:wiki-cold-reader` with `--bundle <page key> --cold`.
+   Record each result with the `SHA256:` line of the bundle the agent was given (the agent repeats it in its report): `ledger.mjs <job> add-review --json '{"plan": "p1", "coverage": "ok", "cold": "ok", "sha256": "<from the bundle>"}'` (`findings` while items are open); the script requires an entry per plan page, for the draft as it is now (a different hash is refused), before `phase: publish`. Handling its answer: [migrate-coverage.md](migrate-coverage.md).
    Without the agent, do both checks yourself against that list and say so. A `[conflict]`
    it reports between the page and a unit, or between two units, is a late conflict
    (migrate-coverage.md): it goes back to Step M5, not into a quiet edit of the draft.

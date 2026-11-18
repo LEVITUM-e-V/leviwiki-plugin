@@ -6,9 +6,10 @@ mapped to it (never the sources or the conversation) and answers with at most
 
 ## The call
 
-`leviwiki:wiki-coverage-checker` with: the page title, the draft markdown, and the
-output of `check-ledger.mjs <job> --units-for <page key>`, pasted as printed:
-the units placed on this page (with `origin`, `state`, `confirmed`), a KNOWN
+`leviwiki:wiki-coverage-checker` with the output of `check-ledger.mjs <job> --bundle <page key>`,
+**pasted into the prompt as printed** (the agent has only `search_wiki`, `get_page` and `get_wiki_structure`: it cannot read
+`drafts/<key>.md`). The block holds: the title, the plan row, the draft between
+`----- DRAFT BEGIN -----` / `----- DRAFT END -----`, the units placed on this page (with `origin`, `state`, `confirmed`), a KNOWN
 EXCLUDED list (linked, dropped, secret units: subject and verdict, never a secret's
 text) and, for a page that links recordings, PLANNED MEDIA (name and url of each). You don't read units.yaml. A page split from an existing page gets only
 the units mapped to it, not the old page's whole text.
@@ -44,7 +45,12 @@ Over 8 problems: fix the first 8, call again, repeat. Run until it says
 
 The checker is not the cold reader: the cold reader asks whether a stranger can
 use the *page*; the checker asks whether the *units* are on it. Run both for a
-new page over about 40 lines, the checker alone for a short one.
+new page over about 40 lines, the checker alone for a short one. The cold reader gets
+`check-ledger.mjs <job> --bundle <page key> --cold` (title, filing, type, template headings and the draft, nothing else), pasted the same way.
+
+**Record every run** in `state.yaml` `reviews` (`ledger.mjs <job> add-review --json '{"plan": "p1", "coverage": "ok", "cold": "ok", "sha256": "<the SHA256 line of the bundle>"}'`; `findings` while items are open, `cold: skipped` for a short page or an update). The input carries the `SHA256:` line the bundle printed (the draft the agent saw); `add-review` refuses a hash that is not the draft's now, and the entry keeps it. The script requires an entry per unpublished plan page before `phase: publish` (a cold read too for a new page over 40 lines) and fails one whose draft changed afterwards: run the checker again after every edit.
+
+**Links.** A SharePoint link on a page must come from an inventory row's `url` (a search or read result's `webUrl`); the checker flags one it can't trace to a row, and the script warns about it.
 
 ## After a change
 

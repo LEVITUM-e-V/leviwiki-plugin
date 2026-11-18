@@ -13,9 +13,15 @@ characters; in a migration the plan key, lower-cased) and a `kind`:
 - `create`: `bookId`, `chapterId` **or** `newChapterName`, `title`, `markdown`, `tags`
   (one `type:`; never `last-reviewed`: a changeset sets none), `summary?`. Checked as
   `preview_publish` checks a create, plus a secret scan of the text.
-- `edit`: exactly `preview_edit`'s input (`pageId`, `ops`, `title`, `summary`, `reviewed`
-  false unless the human said the whole page is accurate, `tags {add, remove, set}`).
-  A visual-editor page is converted by the same op: no `tags` or `reviewed` for it.
+- `edit`: exactly `preview_edit`'s input, plus `key` and `kind: "edit"` (an unknown field is refused):
+  `pageId` (number), `ops` (the section operations below), `title?` (a rename; with no `ops` it is a rename alone), `summary?` (up to 180 characters, the revision note),
+  `reviewed?` (false unless the human said the whole page is accurate), `tags? {add, remove, set}` (lists of `name` or `name:value`; only together with `ops`), `gfmTables?`.
+  A visual-editor page is converted by the same op: no `tags` or `reviewed` for it. The section `ops` (each names a heading of the page as it is now; get_page lists them):
+  `{op: "replace-section", heading, markdown, level?}` replaces everything under the heading and keeps the heading line;
+  `{op: "insert-section-after", after, afterLevel?, heading, markdown, level?}` adds a new section after the section `after`;
+  `{op: "append-section", heading, markdown, level?}` adds one at the end, before a closing Related section (refused if the heading exists);
+  `{op: "replace-all", markdown}` replaces the whole page and must be the only op. Example:
+  `{key: "p3", kind: "edit", pageId: 9005, ops: [{op: "replace-section", heading: "Tools", markdown: "The team uses KiCad for PCB design."}, {op: "append-section", heading: "Related", markdown: "- PCU 1.0 schematic sheets"}], summary: "PCB tool: KiCad", reviewed: false}`.
 - `tags`: `pageId`, `add`, `remove`, `set` (`preview_page_tags` for one page; works on
   `no-ai` pages). A page's tag changes ride in its `edit` op when it has one: two ops on
   one page are refused.

@@ -21,6 +21,8 @@
 //   --dispositions the source restructuring proposal (Step M9): one row per source with its eligibility; exit 1 when a row is refused
 //   --units-for K  the units of page K plus the known-excluded list, formatted for the coverage agent
 //   --hashes       sha256 of each draft, for state.verified
+//   --bundle K     one block for an agent prompt (the agents can't read files): plan page K's plan row, draft, and units with verdict and target (coverage checker);
+//                  with --cold only title, filing, type, template headings and draft (cold reader)
 //   --known        the page ids already triaged-out or digested (the `known` list of sweep_wiki), as JSON
 //
 // From phase verify on (warnings before) it also compares each draft's level-2 headings with the plan page's `template` list, the
@@ -32,7 +34,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, posix, resolve } from "node:path";
+import { join, posix, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The phases of a job, in order. A few checks only bite from `draft` on. */
@@ -773,6 +775,16 @@ export const MEDIA_MODES = ["link", "decompose", "ignore"];
 /** States of a page-store row (pages.yaml). */
 export const PAGE_STATES = ["listed", "candidate", "triaged-out", "digested", "compared", "blocked"];
 
+/** What a page's `mentions` entry says about a unit: the page answers a question the unit settles, contradicts it, is stale because of it, or only needs a link. */
+export const MENTION_KINDS = ["answers", "contradicts", "stale", "link"];
+
+/** The values `reviews` entries in state.yaml take: the coverage check must have run; the cold read only for a long new page. */
+export const REVIEW_COVERAGE = ["ok", "findings"];
+export const REVIEW_COLD = ["ok", "findings", "skipped"];
+
+/** A new page longer than this many lines needs a recorded cold read before publish. */
+export const COLD_READ_LINES = 40;
+
 /** How a compare run may class a unit against a page: covered (optionally `covered#section`), partly, new or conflict. */
 export const COMPARE_RE = /^(covered(#.+)?|partly|new|conflict)$/;
 
@@ -811,6 +823,85 @@ export const pageKey = (r) => (r?.id != null ? String(r.id) : r?.ref != null ? S
  */
 export function knownPages(rows) {
   return rows.filter((r) => r?.id != null && ["triaged-out", "digested", "compared", "blocked"].includes(r.state)).map((r) => Number(r.id)).filter((n) => Number.isFinite(n));
+}
+
+/**
+ * Checks the `mentions` of the page store: while it digests a page the reader also sees the job's units and records, per page,
+ * where the page touches one: `{unit, kind: answers|contradicts|stale|link, quote}` (the list may be empty). From the plan phase on every digested
+ * row has the field (a compared row keeps the one its digest wrote); a `contradicts` mention has a decision of the human (units: [unit], or subject + pages: [page]; required from draft on) or an open question
+ * (`units: [unit]`, or `subject` + `pages: [page]`; enough at plan); an `answers`, `stale` or `link` mention has a plan page with that page_id or a decision of the
+ * human that declines it (`declines_mentions: [page]`); a page the plan edits is not declined and is compared or has mentions.
+ * @param {{rows: any[], units: any[], plan: any[], state: any, atPlan: boolean, atDraft: boolean}} a The page rows, units, plan pages, state and phase flags.
+ * @returns {string[]} Problems.
+ */
+export function checkMentions({ rows, units, plan, state, atPlan, atDraft }) {
+  const out = [];
+  const unitById = new Map(units.map((u) => [String(u?.id), u]));
+  const decisions = userDecisions(state);
+  const questions = asList(state?.open_questions).filter((q) => q && typeof q === "object" && q.status === "open");
+  const planned = new Set(plan.filter((p) => p && p.page_id != null && p.action === "update").map((p) => String(p.page_id)));
+  const names = (d, f) => asList(d?.[f]).map(String);
+  for (const r of rows) {
+    const key = pageKey(r);
+    if (key === undefined) continue;
+    const label = `pages ${key}`;
+    if (atPlan && r.state === "digested" && !Array.isArray(r.mentions)) {
+      out.push(`${label}: a digested row needs mentions (a list, empty [] when the page touches none of the job's units): the reader records where the page answers, contradicts or is made stale by a unit, or only needs a link`);
+    }
+    if (r.mentions == null) continue;
+    if (!Array.isArray(r.mentions)) {
+      out.push(`${label}: mentions must be a list of {unit, kind, quote}`);
+      continue;
+    }
+    for (const m of r.mentions) {
+      const uid = String(m?.unit ?? "");
+      if (!m || typeof m !== "object" || !uid) {
+        out.push(`${label}: a mention needs unit, kind and quote`);
+        continue;
+      }
+      const u = unitById.get(uid);
+      if (!u) out.push(`${label}: mention names ${uid}, which is not a unit`);
+      if (!MENTION_KINDS.includes(m.kind)) {
+        out.push(`${label}: mention of ${uid} has kind "${m.kind ?? ""}"; use ${MENTION_KINDS.join(", ")}`);
+        continue;
+      }
+      if (!String(m.quote ?? "").trim()) out.push(`${label}: mention of ${uid} needs a short quote from the page`);
+      if (!atPlan || !u) continue;
+      const about = (x) => names(x, "units").includes(uid) || (String(x?.subject ?? "") === String(u.subject ?? "") && names(x, "pages").includes(key));
+      if (m.kind === "contradicts") {
+        const decided = decisions.some(about);
+        if (!decided && !questions.some(about)) out.push(`${label}: unit ${uid} contradicts what this page says ("${String(m.quote).slice(0, 60)}"), and no decision of the human lists the unit (units: [${uid}]) and no open question names it (units: [${uid}]): ask it in the Step M5 batch`);
+        else if (!decided && atDraft) out.push(`${label}: unit ${uid} contradicts this page and the human has not decided yet (a decision with units: [${uid}], or subject + pages: [${key}]); a draft waits for it`);
+      } else if (isPlacedUnit(u) && !planned.has(key) && !decisions.some((d) => names(d, "declines_mentions").includes(key))) {
+        out.push(`${label}: unit ${uid} ${m.kind} this page ("${String(m.quote).slice(0, 60)}"), but the plan has no page that updates it (action: update, page_id ${key}; an archive does not settle it) and no decision of the human declines it (declines_mentions: [${key}])`);
+      }
+    }
+  }
+  if (atPlan) {
+    const byKey = new Map(rows.map((r) => [pageKey(r), r]));
+    for (const p of plan) {
+      if (!p || p.page_id == null || (p.action !== "update" && p.action !== "archive")) continue;
+      const r = byKey.get(String(p.page_id));
+      if (!r || r.state === "blocked") continue;
+      const cmp = r.compared && typeof r.compared === "object" && !Array.isArray(r.compared) ? r.compared : {};
+      if (r.declined != null) out.push(`plan ${p.key}: edits page ${p.page_id}, which is recorded as declined (${r.declined}); a page the plan edits is compared or has its mentions, never declined`);
+      else if (!Object.keys(cmp).length && !(Array.isArray(r.mentions) && r.mentions.length)) out.push(`plan ${p.key}: edits page ${p.page_id}, which was neither compared with the units nor has mentions recorded (pages.yaml row ${p.page_id}); compare it or record the mentions that make the edit necessary`);
+    }
+  }
+  return out;
+}
+
+/** Fewest real words a `compare_reason` has on a page that matches a topic of the job. */
+export const MIN_SKIP_WORDS = 6;
+
+/**
+ * Whether a skip reason is a sentence and not a placeholder: at least MIN_SKIP_WORDS words that are not n/a, none, -, tbd, todo, unknown and the like.
+ * @param {unknown} text The `compare_reason`.
+ * @returns {boolean}
+ */
+export function isRealReason(text) {
+  const words = String(text ?? "").split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w) && !/^(n\/?a|none|nothing|tbd|todo|unknown|no|nil)\W*$/i.test(w));
+  return words.length >= MIN_SKIP_WORDS;
 }
 
 /**
@@ -858,8 +949,13 @@ export function checkPages({ rows, units, plan, state, atPlan, atDraft, atPublis
         problems.push(`${label}: unit ${uid} conflicts with this page, and no decision of the human lists the unit (units: [${uid}]) or names its subject together with this page (subject + pages: [${key}]) (Step M5)`);
       }
     }
-    if (atPlan && r.state === "digested" && asList(r.topics).length && r.declined == null && !Object.keys(cmp).length) problems.push(`${label}: a digested page on topic ${asList(r.topics).join(", ")} was never compared with the units (compare mode), and is not declined`);
+    //: the agent may skip the unit-by-unit compare itself (compare: skipped + reason) once the page's mentions are recorded; the human is not asked
+    if (r.compare != null && r.compare !== "skipped") problems.push(`${label}: compare is "${r.compare}"; the only value is skipped (with compare_reason); a compared page has compared: {unit: class}`);
+    if (r.compare === "skipped" && !String(r.compare_reason ?? "").trim()) problems.push(`${label}: compare: skipped needs compare_reason (why no unit of the job is on this page)`);
+    else if (r.compare === "skipped" && asList(r.topics).length && !isRealReason(r.compare_reason)) problems.push(`${label}: compare: skipped on a page of topic ${asList(r.topics).join(", ")} needs a compare_reason of at least ${MIN_SKIP_WORDS} words that says why no unit of the job is on it (not a placeholder such as n/a or tbd)`);
+    if (atPlan && r.state === "digested" && asList(r.topics).length && r.declined == null && r.compare !== "skipped" && !Object.keys(cmp).length) problems.push(`${label}: a digested page on topic ${asList(r.topics).join(", ")} was never compared with the units (compare mode); compare it, or record compare: skipped with compare_reason and its mentions`);
   }
+  problems.push(...checkMentions({ rows, units, plan, state, atPlan, atDraft }));
   if (atPublish) {
     const byId = new Map(rows.filter((r) => r?.id != null).map((r) => [String(r.id), r]));
     for (const p of plan) {
@@ -1319,7 +1415,10 @@ export function checkLedger(files, opts = {}) {
     const src = sourceIds.get(String(u.source));
     if (!u.source) problems.push(`unit ${id}: no source`);
     else if (sourceIds.size && !src && u.origin !== "human") problems.push(`unit ${id}: source ${u.source} is not in inventory.yaml`);
-    else if (src?.verdict && src.verdict !== "decomposed") problems.push(`unit ${id}: its source ${u.source} is ${src.verdict}, which never produces units`);
+    //: units are added while their source is still pending (that is when they are read); the verdict is set once the source is decomposed, before the plan
+    else if (src?.verdict === "pending") {
+      if (at("plan")) problems.push(`unit ${id}: its source ${u.source} is still pending; set its verdict to decomposed (ledger.mjs set-source-verdict ${u.source} decomposed) before the plan`);
+    } else if (src?.verdict && src.verdict !== "decomposed") problems.push(`unit ${id}: its source ${u.source} is ${src.verdict}, which never produces units`);
     if (!u.version) problems.push(`unit ${id}: no source version`);
     if (!UNIT_KINDS.includes(u.kind)) problems.push(`unit ${id}: kind "${u.kind ?? ""}" is not one of ${UNIT_KINDS.join(", ")}`);
     if (!u.subject) problems.push(`unit ${id}: no subject`);
@@ -1525,6 +1624,45 @@ export function checkLedger(files, opts = {}) {
     }
   }
 
+  //: the coverage check (and, for a long new page, the cold read) must have run on the draft: state.reviews, one entry per plan page (ledger.mjs add-review)
+  if (state.reviews != null && !Array.isArray(state.reviews)) problems.push("state.yaml: reviews must be a list of {plan, coverage, cold, at}");
+  const reviews = new Map();
+  for (const e of asList(state.reviews)) {
+    if (!e?.plan || !planKeys.has(String(e.plan))) {
+      problems.push(`state.yaml: reviews entry ${e?.plan ?? "?"} is not a page of plan.yaml`);
+      continue;
+    }
+    if (!REVIEW_COVERAGE.includes(e.coverage)) problems.push(`state.yaml: reviews ${e.plan}: coverage must be ${REVIEW_COVERAGE.join(" or ")}`);
+    if (e.cold != null && !REVIEW_COLD.includes(e.cold)) problems.push(`state.yaml: reviews ${e.plan}: cold must be ${REVIEW_COLD.join(", ")}`);
+    reviews.set(String(e.plan), e);
+  }
+  if (at("publish")) {
+    for (const p of pages) {
+      if (!p?.key || p.action === "archive" || published.has(String(p.key)) || skipped.has(String(p.key)) || drafts[p.key] === undefined) continue;
+      const e = reviews.get(String(p.key));
+      if (!e) {
+        problems.push(`plan ${p.key}: no state.reviews entry; run the coverage check (check-ledger.mjs <job> --bundle ${p.key}) and record it (ledger.mjs add-review)`);
+        continue;
+      }
+      if (!e.sha256) problems.push(`plan ${p.key}: its state.reviews entry has no sha256 (the SHA256 line of check-ledger.mjs <job> --bundle ${p.key}); run the agent on the bundle and record it again with add-review`);
+      if (e.coverage === "findings") warnings.push(`plan ${p.key}: the last coverage check ended with findings; run it again until it says Complete, or note why the rest stands`);
+      if (p.action === "create" && drafts[p.key].split("\n").length > COLD_READ_LINES && !["ok", "findings"].includes(e.cold)) problems.push(`plan ${p.key}: a new page over ${COLD_READ_LINES} lines needs its cold read recorded (check-ledger.mjs <job> --bundle ${p.key} --cold, then add-review with cold)`);
+      if (e.sha256 && opts.hashOf && e.sha256 !== opts.hashOf(drafts[p.key])) problems.push(`plan ${p.key}: the draft changed after its review; run the coverage check again and record it`);
+    }
+  }
+
+  //: a SharePoint link must come from a search or read result, never from a folder path; when the inventory rows carry url, one that matches none is suspect
+  const known = new Set(sources.map((s) => linkKey(s?.url)).filter(Boolean));
+  if (known.size) {
+    for (const [key, md] of Object.entries(drafts)) {
+      const text = withoutCode(md);
+      const found = [...text.matchAll(/\]\(([^)\s]*sharepoint\.com[^)\s]*)/gi), ...text.matchAll(/<(https?:\/\/[^>\s]*sharepoint\.com[^>\s]*)>/gi), ...text.matchAll(/^ {0,3}\[[^\]]+\]:\s*<?(\S*sharepoint\.com[^>\s]*)/gim)];
+      for (const m of found) {
+        if (!known.has(linkKey(m[1]))) warnings.push(`draft ${key}: SharePoint link ${m[1]} matches no inventory url; take links from a search or read result's webUrl, never build them from a folder path`);
+      }
+    }
+  }
+
   // retire last: archiving a page can save new revisions of the pages that link it, which refuses their approved previews
   if (at("publish")) {
     for (const p of pages) {
@@ -1552,6 +1690,23 @@ export function checkLedger(files, opts = {}) {
   }
 
   return { problems, warnings, counts, order: [...order.filter((k) => planByKey.get(k)?.action !== "archive"), ...order.filter((k) => planByKey.get(k)?.action === "archive")], cycles };
+}
+
+/**
+ * A link in a comparable form: decoded, without query and fragment and trailing slashes, lower case (SharePoint treats paths case-insensitively).
+ * @param {unknown} url A link or an inventory `url`.
+ * @returns {string} The key, or "" for no usable link.
+ */
+export function linkKey(url) {
+  let s = String(url ?? "").trim();
+  if (!s) return "";
+  s = s.replace(/[?#].*$/, "");
+  try {
+    s = decodeURI(s);
+  } catch {
+    /* keep the raw text */
+  }
+  return s.replace(/\/+$/, "").toLowerCase();
 }
 
 /**
@@ -1623,9 +1778,10 @@ export function conflictsView(units, sources) {
  * @param {string} key The plan page's key.
  * @param {any[]} units All units.
  * @param {any[]} [media] The inventory rows (`media: true`) the plan page lists in `media`; printed as PLANNED MEDIA so the checker can compare the page's links.
+ * @param {boolean} [detail] Also print each unit's verdict and target (`keep>p1`), as the --bundle block does.
  * @returns {string}
  */
-export function unitsFor(key, units, media = []) {
+export function unitsFor(key, units, media = [], detail = false) {
   const mine = units.filter((u) => isPlacedUnit(u) && String(u.target) === key);
   const sources = new Set(mine.map((u) => String(u.source)));
   const lines = ["UNITS (keep or merge, on this page):"];
@@ -1633,7 +1789,7 @@ export function unitsFor(key, units, media = []) {
     const flags = [`origin ${u.origin}`, `state ${u.state}`];
     if (u.origin === "inferred" && u.confirmed) flags.push(`confirmed ${u.confirmed}`);
     if (u.verdict === "merge") flags.push(`merged into ${u.merged_into}`);
-    lines.push(`- ${u.id} | ${u.kind} | ${u.subject} | ${flags.join(", ")} | ${u.text}`);
+    lines.push(`- ${u.id} | ${u.kind} | ${u.subject} | ${flags.join(", ")} | ${detail ? `${u.verdict}>${u.target} | ` : ""}${u.text}`);
   }
   lines.push("", "KNOWN EXCLUDED (left out on purpose; the page must not state them):");
   const excluded = units.filter((u) => ["link-only", "drop", "out-of-scope", "secret"].includes(u.verdict) && sources.has(String(u.source)));
@@ -1644,6 +1800,32 @@ export function unitsFor(key, units, media = []) {
     for (const m of media) lines.push(`- ${m.id} | ${String(m.path ?? m.title ?? "").split("/").pop()} | ${m.url ?? "(no url yet)"}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * Everything one agent call needs for one plan page, as one block to paste into the prompt (the agents have no file tools, so they can't read drafts/<key>.md):
+ * for the coverage checker the plan row, the draft and its units (text, verdict, target; KNOWN EXCLUDED; PLANNED MEDIA); for the cold reader (`cold`) the title,
+ * filing, type, template headings and the draft, nothing else. A `SHA256:` line closes the draft: the agent's report carries it back, and `ledger.mjs add-review` refuses a different one.
+ * @param {string} key The plan page's key.
+ * @param {{plan: any[], units: any[], sources: any[], drafts: Record<string, string>, cold?: boolean}} a The plan pages, units, inventory rows, drafts by key and the mode.
+ * @returns {string}
+ * @throws {Error} When the key is not a page of the plan, is an archive, or has no draft.
+ */
+export function bundleFor(key, { plan, units, sources, drafts, cold = false }) {
+  const page = plan.find((p) => p?.key === key);
+  if (!page) throw new Error(`${key} is not a page of plan.yaml`);
+  if (page.action === "archive") throw new Error(`${key} archives a page; it has no draft to check`);
+  const md = drafts[key];
+  if (md === undefined) throw new Error(`plan ${key}: no draft file (drafts/${key}.md)`);
+  const draft = ["----- DRAFT BEGIN -----", md.replace(/\n+$/, ""), "----- DRAFT END -----", `SHA256: ${createHash("sha256").update(md).digest("hex")}`];
+  if (cold) {
+    const head = [`TITLE: ${page.title ?? "(an update of an existing page)"}`, `FILED: ${page.filing ?? ""}`, `TYPE: ${[page.type, ...asList(page.also)].filter(Boolean).join(" + ")}${page.form ? ` (${page.form})` : ""}`];
+    if (Array.isArray(page.template)) head.push(`TEMPLATE HEADINGS: ${page.template.join(" | ")}`);
+    return [...head, "", ...draft].join("\n");
+  }
+  const planned = asList(page.media).map(String);
+  const media = sources.filter((x) => planned.includes(String(x?.id)));
+  return [`TITLE: ${page.title ?? "(an update of an existing page)"}`, `PLAN ROW: ${JSON.stringify(page)}`, "", ...draft, "", unitsFor(key, units, media, true)].join("\n");
 }
 
 /**
@@ -1693,9 +1875,26 @@ export function resolveJobDir(arg) {
 }
 
 /**
+ * Whether a draft path lies inside `<job>/drafts` (symlinks resolved when the file exists).
+ * @param {string} dir The job folder.
+ * @param {string} path The resolved draft path.
+ * @returns {boolean}
+ */
+export function insideDrafts(dir, path) {
+  const root = resolve(dir, "drafts");
+  const within = (a, b) => a === b || a.startsWith(b + sep);
+  if (!within(path, root)) return false;
+  try {
+    return within(realpathSync(path), realpathSync(root));
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Reads every ledger file of a job folder (a missing optional file is undefined), the drafts by plan key and the names of other files in the folder.
  * @param {string} arg The job folder as given.
- * @returns {{dir: string, state: any, plan: any, units: any, inventory: any, sweep: any, pages: any, drafts: Record<string, string>, extraFiles: string[]}}
+ * @returns {{dir: string, state: any, plan: any, units: any, inventory: any, sweep: any, pages: any, drafts: Record<string, string>, escaped: string[], extraFiles: string[]}}
  */
 export function loadJob(arg) {
   const dir = resolveJobDir(arg);
@@ -1706,16 +1905,22 @@ export function loadJob(arg) {
   const sweep = readLedgerFile(dir, "sweep.yaml", false);
   const pages = readLedgerFile(dir, "pages.yaml", false);
   const drafts = {};
+  const escaped = [];
   for (const p of asList(plan?.pages)) {
-    const path = join(dir, p?.draft ?? `drafts/${p?.key}.md`);
-    if (p?.key && existsSync(path)) drafts[p.key] = readFileSync(path, "utf8");
+    const path = resolve(dir, p?.draft ?? `drafts/${p?.key}.md`);
+    if (!p?.key) continue;
+    if (!insideDrafts(dir, path)) {
+      escaped.push(String(p.key));
+      continue;
+    }
+    if (existsSync(path)) drafts[p.key] = readFileSync(path, "utf8");
   }
-  return { dir, state, plan, units, inventory, sweep, pages, drafts, extraFiles: readdirSync(dir) };
+  return { dir, state, plan, units, inventory, sweep, pages, drafts, escaped, extraFiles: readdirSync(dir) };
 }
 
 /** The flags without a value, and the ones that take one. */
-const BOOL_FLAGS = ["--close", "--final", "--order", "--json", "--conflicts", "--subjects", "--hashes", "--dispositions", "--known", "--layers"];
-const VALUE_FLAGS = ["--units-for"];
+const BOOL_FLAGS = ["--close", "--final", "--order", "--json", "--conflicts", "--subjects", "--hashes", "--dispositions", "--known", "--layers", "--cold"];
+const VALUE_FLAGS = ["--units-for", "--bundle"];
 
 /**
  * Runs the check on a job folder.
@@ -1735,7 +1940,7 @@ export function main(argv) {
   const unknown = [...flags].filter((f) => !BOOL_FLAGS.includes(f));
   const missing = VALUE_FLAGS.filter((f) => f in values && !values[f]);
   if (rest.length !== 1 || unknown.length || missing.length) {
-    console.error(`usage: check-ledger.mjs <job dir> [${BOOL_FLAGS.join("] [")}] [--units-for <page key>]`);
+    console.error(`usage: check-ledger.mjs <job dir> [${BOOL_FLAGS.join("] [")}] [--units-for <page key>] [--bundle <page key>]`);
     return 2;
   }
   try {
@@ -1765,6 +1970,10 @@ export function main(argv) {
       console.log(unitsFor(values["--units-for"], unitList, asList(inventory?.sources).filter((x) => planned.includes(String(x?.id)))));
       return 0;
     }
+    if (values["--bundle"]) {
+      console.log(bundleFor(values["--bundle"], { plan: asList(plan?.pages), units: unitList, sources: asList(inventory?.sources), drafts, cold: flags.has("--cold") }));
+      return 0;
+    }
     if (flags.has("--known")) {
       console.log(JSON.stringify(knownPages(asList(pages?.pages))));
       return 0;
@@ -1782,6 +1991,7 @@ export function main(argv) {
     }
 
     const report = checkLedger({ state, plan, units, inventory, sweep, pages, extraFiles: job.extraFiles, drafts }, { close: flags.has("--close"), final: flags.has("--final"), hashOf });
+    for (const k of job.escaped) report.problems.push(`plan ${k}: its draft path lies outside ${dir}/drafts; a draft is drafts/<key>.md inside the job folder`);
     // The folder holds source text: no access for group or others (POSIX only).
     if (process.platform !== "win32" && (statSync(dir).mode & 0o077) !== 0) {
       report.problems.push(`${dir} is accessible to others (mode ${(statSync(dir).mode & 0o777).toString(8)}); run chmod 700 on it`);

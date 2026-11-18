@@ -3,6 +3,11 @@
 // No LLM, no network, no dependencies: plain Node. It reads the job folder with the same YAML subset as check-ledger.mjs,
 // changes one thing in memory, runs the full check on the result and writes only when the change adds no problem.
 //
+//   node ledger.mjs <job dir> init                     create the job folder (mode 700, drafts/ 700) and the empty ledger files (mode 600)
+//   node ledger.mjs <job dir> add-source   <input>     append inventory rows (ids s01... assigned, verdict pending unless given)
+//   node ledger.mjs <job dir> set-source-verdict <source id> <verdict> [--reason <text>] [--block-reason <text>] [--duplicate-of <id>] [--no-knowledge <text>]
+//   node ledger.mjs <job dir> set-unit-verdict <unit id> <verdict> [--target <plan key>] [--link <url>] [--reason <text>] [--decision <id>] [--merged-into <unit id>] [--superseded-by <unit id>] [--confirmed <id>]
+//   node ledger.mjs <job dir> add-review   <input>     record a coverage / cold-read result for a plan page (state.yaml reviews:; the input carries the sha256 the bundle printed, a changed draft is refused)
 //   node ledger.mjs <job dir> add-units    <input>     append units (ids u001... assigned, counts in state.yaml updated)
 //   node ledger.mjs <job dir> add-decision <input>     append a decision of the human (decided_by: user, id and date added)
 //   node ledger.mjs <job dir> set-policy   <key> <input> | --na    record an intake answer (policies.<key>)
@@ -15,15 +20,17 @@
 //
 // <input> is `--json '<value>'`, `--yaml '<text>'` (the reader's flow lines), `--file <path>` (JSON or YAML) or `--stdin`.
 // Flags count only before a `--` separator (for `note` only as the first argument); after it everything is text, so a note may say "--next".
-// A file other than units.yaml is rewritten in a canonical layout (comments are not kept); units.yaml is only appended to.
+// A file other than units.yaml is rewritten in a canonical layout (comments are not kept); units.yaml is only appended to
+// (set-unit-verdict is the one exception: it changes a unit's verdict fields in place, never its text, source or id).
 // A change is refused only for problems it ADDS: a problem that already existed (a count mismatch after an interrupted write, say) does not block it (problems are compared with their numbers normalised, so a count that moved is not new).
 // Exit 0: written; 1: refused (the problems the change would add are listed, nothing is written); 2: usage or unreadable ledger.
 
-import { readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PHASES, POLICY_KEYS, POLICY_NA, checkLedger, loadJob, parseYaml } from "./check-ledger.mjs";
+import { PHASES, POLICY_KEYS, POLICY_NA, REVIEW_COLD, REVIEW_COVERAGE, SOURCE_VERDICTS, UNIT_VERDICTS, checkLedger, loadJob, parseYaml } from "./check-ledger.mjs";
 
 /** The inventory fields set-fate may write: the M9 proposal and the executed fate. */
 export const FATE_FIELDS = ["disposition", "disposition_reason", "lives_at", "new_path", "breaks", "order", "fate", "fate_link", "fate_reason", "decision", "executed_at", "version_checked", "branch", "pr", "default_branch", "unresolved", "url"];
@@ -146,6 +153,77 @@ function nextNumber(ids, prefix) {
 }
 
 /**
+ * Takes the `--name <value>` options out of a command's arguments.
+ * @param {string[]} args The arguments after the input flags were taken out.
+ * @param {string[]} names The option names (with the leading `--`).
+ * @returns {{opts: Record<string, string>, pos: string[]}} The values by option name, and the other arguments.
+ */
+export function takeOpts(args, names) {
+  const opts = {};
+  const pos = [];
+  for (let i = 0; i < args.length; i++) {
+    if (names.includes(args[i])) {
+      if (args[i + 1] === undefined) throw new Error(`${args[i]} needs a value`);
+      opts[args[i]] = args[++i];
+    } else pos.push(args[i]);
+  }
+  return { opts, pos };
+}
+
+/**
+ * Prepares the text of units.yaml for an append (an empty file, or one without the `units:` header, would get lines the checker could not read):
+ * a missing or empty file becomes the header alone, a file without the header gets it, and `units: []` becomes the open header so a list item can follow.
+ * @param {string} old The file's text ("" when missing).
+ * @returns {string} Text that ends with a newline and starts with the `units:` header.
+ */
+export function normaliseUnitsText(old) {
+  let text = old.replace(/\s+$/, "");
+  if (!text) return "units:\n";
+  if (!/^units:/m.test(text)) text = `units:\n${text}`;
+  else text = text.replace(/^units:[ \t]*\[[ \t]*\][ \t]*$/m, "units:");
+  return `${text}\n`;
+}
+
+/**
+ * Creates a job folder (`mkdir -p -m 700 job/drafts` leaves the job folder at 755): the folder and drafts/ at mode 700 (chmod'ed, not only created, so the umask and
+ * existing parents can't leave them open), and the empty ledger files at mode 600, each with its top-level key. Refuses a folder that holds any ledger file or any other file (only a new or empty folder is chmod'ed) and one inside a git work tree.
+ * @param {string} dirArg The job folder (`~/.leviwiki/migrate/<job>`).
+ * @returns {string} A one-line summary.
+ */
+export function initJob(dirArg) {
+  const dir = resolve(dirArg);
+  for (const name of ["state.yaml", "inventory.yaml", "units.yaml", "plan.yaml", "sweep.yaml", "pages.yaml"]) {
+    if (existsSync(join(dir, name))) throw new Error(`init: ${dir} already holds a ledger file (${name})`);
+  }
+  if (existsSync(dir)) {
+    const names = readdirSync(dir);
+    const emptyDrafts = (n) => n === "drafts" && existsSync(join(dir, n)) && statSync(join(dir, n)).isDirectory() && readdirSync(join(dir, n)).length === 0;
+    if (names.some((n) => !emptyDrafts(n))) throw new Error(`init: ${dir} exists and is not empty; init only creates a new job folder (or fills an empty one) and never changes the mode of a folder that holds other files`);
+  }
+  let anchor = dir;
+  while (!existsSync(anchor) && dirname(anchor) !== anchor) anchor = dirname(anchor);
+  const git = spawnSync("git", ["-C", realpathSync(anchor), "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  if (git.status === 0 && git.stdout.trim() === "true") throw new Error(`init: ${dir} is inside a git work tree; the ledger holds source text and must live outside every repository (~/.leviwiki/migrate/<job>/)`);
+  mkdirSync(join(dir, "drafts"), { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  chmodSync(join(dir, "drafts"), 0o700);
+  const files = {
+    "state.yaml": { job: basename(dir), phase: "scope", started: today(), counts: { units: 0, max_unit_id: 0 }, decisions: [], open_questions: [], notes: [] },
+    "inventory.yaml": { sources: [] },
+    "plan.yaml": { pages: [] },
+    "sweep.yaml": { sweeps: [] },
+    "pages.yaml": { pages: [] },
+  };
+  for (const [name, value] of Object.entries(files)) {
+    writeChecked(join(dir, name), `${dumpMap(value).join("\n")}\n`, value);
+    chmodSync(join(dir, name), 0o600);
+  }
+  writeFileSync(join(dir, "units.yaml"), "units:\n", { mode: 0o600 });
+  chmodSync(join(dir, "units.yaml"), 0o600);
+  return `job folder ${dir} created (mode 700, drafts/ 700, ledger files 600)`;
+}
+
+/**
  * Applies one command to the loaded job in memory.
  * @param {any} job The loaded job (parsed files); changed in place.
  * @param {string} cmd The command.
@@ -194,11 +272,62 @@ export function apply(job, cmd, args, input, flags = []) {
     case "set-fate": {
       const row = list(job.inventory?.sources).find((s) => String(s.id) === String(args[0]));
       if (!row) throw new Error(`set-fate: ${args[0] ?? "(no id)"} is not an inventory row`);
-      const patch = items(input, "fate")[0] ?? {};
+      //: the row's own `fate` field collides with the wrapper key, so a flat {fate: "moved", ...} was read as an empty wrapper: wrapped means `fate` holds a map
+      const isMap = (x) => x && typeof x === "object" && !Array.isArray(x);
+      const first = Array.isArray(input) ? input[0] : input;
+      const patch = isMap(first) ? { ...(isMap(first.fate) ? first.fate : first) } : {};
+      if (String(patch.id ?? "") === String(row.id)) delete patch.id;
       const bad = Object.keys(patch).filter((k) => !FATE_FIELDS.includes(k));
       if (bad.length) throw new Error(`set-fate: ${bad.join(", ")} is not a proposal or fate field (${FATE_FIELDS.join(", ")})`);
       Object.assign(row, patch);
       return { files: ["inventory.yaml"], summary: `source ${row.id}: ${Object.keys(patch).join(", ")} set` };
+    }
+    case "add-source": {
+      const rows = items(input, "sources");
+      if (!rows.length) throw new Error("add-source: no source in the input");
+      const have = list(job.inventory?.sources);
+      let n = nextNumber(have.map((s) => s.id), "s");
+      const made = rows.map((r) => ({ ...r, id: r.id ?? `s${String(n++).padStart(2, "0")}`, verdict: r.verdict ?? "pending" }));
+      job.inventory = { ...(job.inventory ?? {}), sources: [...have, ...made] };
+      return { files: ["inventory.yaml"], summary: `${made.length} source(s) added (${made.map((s) => s.id).join(", ")})` };
+    }
+    case "set-source-verdict": {
+      const { opts, pos } = takeOpts(args, ["--reason", "--block-reason", "--duplicate-of", "--no-knowledge"]);
+      const row = list(job.inventory?.sources).find((s) => String(s.id) === String(pos[0]));
+      if (!row) throw new Error(`set-source-verdict: ${pos[0] ?? "(no id)"} is not an inventory row`);
+      if (!SOURCE_VERDICTS.includes(pos[1])) throw new Error(`set-source-verdict: the verdict must be one of ${SOURCE_VERDICTS.join(", ")}`);
+      row.verdict = pos[1];
+      if (opts["--reason"] !== undefined) row.reason = opts["--reason"];
+      if (opts["--block-reason"] !== undefined) row.block_reason = opts["--block-reason"];
+      if (opts["--duplicate-of"] !== undefined) row.duplicate_of = opts["--duplicate-of"];
+      if (opts["--no-knowledge"] !== undefined) row.no_knowledge = opts["--no-knowledge"];
+      return { files: ["inventory.yaml"], summary: `source ${row.id}: verdict ${row.verdict}` };
+    }
+    case "set-unit-verdict": {
+      const { opts, pos } = takeOpts(args, ["--target", "--link", "--reason", "--decision", "--merged-into", "--superseded-by", "--confirmed"]);
+      const unit = list(job.units?.units).find((u) => String(u.id) === String(pos[0]));
+      if (!unit) throw new Error(`set-unit-verdict: ${pos[0] ?? "(no id)"} is not a unit`);
+      if (!UNIT_VERDICTS.includes(pos[1])) throw new Error(`set-unit-verdict: the verdict must be one of ${UNIT_VERDICTS.join(", ")}`);
+      // a new verdict starts clean: the fields of the old one (target, link, reason, merge and supersede pointers) go, `decision` and `confirmed` stay
+      for (const k of ["target", "link", "reason", "merged_into", "superseded_by"]) delete unit[k];
+      unit.verdict = pos[1];
+      const map = { "--target": "target", "--link": "link", "--reason": "reason", "--decision": "decision", "--merged-into": "merged_into", "--superseded-by": "superseded_by", "--confirmed": "confirmed" };
+      for (const [flag, field] of Object.entries(map)) if (opts[flag] !== undefined) unit[field] = opts[flag];
+      return { files: ["units.yaml"], summary: `unit ${unit.id}: verdict ${unit.verdict}${unit.target ? ` on ${unit.target}` : ""}` };
+    }
+    case "add-review": {
+      const r = items(input, "review")[0];
+      if (!r?.plan) throw new Error("add-review: the input needs plan (the plan page's key)");
+      if (!REVIEW_COVERAGE.includes(r.coverage)) throw new Error(`add-review: coverage must be ${REVIEW_COVERAGE.join(" or ")}`);
+      if (r.cold !== undefined && !REVIEW_COLD.includes(r.cold)) throw new Error(`add-review: cold must be ${REVIEW_COLD.join(", ")}`);
+      const draft = job.drafts?.[r.plan];
+      if (draft === undefined) throw new Error(`add-review: plan ${r.plan} has no draft (drafts/${r.plan}.md); the review is of that draft`);
+      const current = createHash("sha256").update(draft).digest("hex");
+      if (!r.sha256) throw new Error(`add-review: the input needs sha256, the SHA256 line of the bundle the agent was given (check-ledger.mjs <job> --bundle ${r.plan})`);
+      if (String(r.sha256) !== current) throw new Error(`add-review: sha256 ${r.sha256} is not the hash of drafts/${r.plan}.md as it is now (${current}); the draft changed after the bundle was made: run the agent again on a new bundle`);
+      const entry = { plan: String(r.plan), coverage: r.coverage, ...(r.cold !== undefined ? { cold: r.cold } : {}), at: r.at ?? today(), sha256: current };
+      state.reviews = [...list(state.reviews).filter((e) => String(e?.plan) !== entry.plan), entry];
+      return { files: ["state.yaml"], summary: `review of ${entry.plan}: coverage ${entry.coverage}${entry.cold ? `, cold ${entry.cold}` : ""}` };
     }
     case "add-sweep": {
       const recs = items(input, "sweeps");
@@ -304,13 +433,24 @@ export function splitArgs(cmd, tail) {
 export function main(argv) {
   const [dirArg, cmd, ...tail] = argv;
   if (!dirArg || !cmd) {
-    console.error("usage: ledger.mjs <job dir> <add-units|add-decision|set-policy|set-fate|add-sweep|upsert-page|set-phase|note> ... (see the header of this script)");
+    console.error("usage: ledger.mjs <job dir> <init|add-source|set-source-verdict|add-units|set-unit-verdict|add-decision|set-policy|set-fate|add-sweep|upsert-page|add-review|set-phase|note|repair-counts> ... (see the header of this script)");
     return 2;
   }
   try {
+    if (cmd === "init") {
+      console.log(`ok: ${initJob(dirArg)}`);
+      return 0;
+    }
     const { flags, positional } = splitArgs(cmd, tail);
     const { value, rest } = cmd === "note" ? { value: undefined, rest: positional } : readInput(positional);
     const job = loadJob(dirArg);
+    let unitsText = "";
+    if (cmd === "add-units") {
+      //: an empty units.yaml, or one without its `units:` header, silently took lines the checker could not read
+      const path = join(job.dir, "units.yaml");
+      unitsText = normaliseUnitsText(existsSync(path) ? readFileSync(path, "utf8") : "");
+      job.units = parseYaml(unitsText) ?? {};
+    }
     const before = problemsOf(job);
     const oldPhase = PHASES.indexOf(String(job.state.phase ?? ""));
     const clone = structuredClone({ ...job, drafts: {} });
@@ -325,13 +465,18 @@ export function main(argv) {
     }
     if (out.appendUnits) {
       const path = join(job.dir, "units.yaml");
-      const old = existsSync(path) ? readFileSync(path, "utf8") : "units:\n";
-      const text = `${old}${old.endsWith("\n") ? "" : "\n"}${out.appendUnits}\n`;
-      parseYaml(text);
+      const text = `${unitsText}${out.appendUnits}\n`;
+      // the result must read back as exactly the old units plus the new ones, or nothing is written
+      const back = parseYaml(text)?.units;
+      const want = work.units.units;
+      if (!Array.isArray(back) || back.length !== want.length || back.some((u, i) => String(u?.id) !== String(want[i]?.id))) {
+        console.error("add-units: the new units.yaml would not read back as the expected units (the file's layout is not the ledger's); nothing written. Check units.yaml: it must be `units:` followed by one `  - {…}` line per unit.");
+        return 1;
+      }
       writeFileSync(`${path}.tmp-${process.pid}`, text, { mode: 0o600 });
       renameSync(`${path}.tmp-${process.pid}`, path);
     }
-    const names = { "state.yaml": work.state, "inventory.yaml": work.inventory, "sweep.yaml": work.sweep, "pages.yaml": work.pages };
+    const names = { "state.yaml": work.state, "inventory.yaml": work.inventory, "sweep.yaml": work.sweep, "pages.yaml": work.pages, "units.yaml": work.units };
     for (const f of out.files) rewrite(job.dir, f, names[f]);
     console.log(`ok: ${out.summary}`);
     return 0;

@@ -9,8 +9,8 @@ You check a draft page for the LEVITUM wiki (a student team building hydrogen-po
 
 ## What you get
 
-The page's title and its markdown, and two lists, as the ledger script prints them:
-- **UNITS:** the units placed on this page, each with `id`, `kind`, `subject`, `origin` (`read`, `inferred` or `human`; an inferred unit may say `confirmed <decision>`), `state` (`current` or `plan`), `merged into <id>` for a merged unit, and `text`.
+**One block in the prompt**, as `check-ledger.mjs <job> --bundle <page key>` prints it: the title, the plan row, the draft between `----- DRAFT BEGIN -----` and `----- DRAFT END -----` (you have no file tools: the draft is always in the prompt, never a path to read), and two lists:
+- **UNITS:** the units placed on this page, each with `id`, `kind`, `subject`, `origin`, the verdict and target (`keep>p1`) (`read`, `inferred` or `human`; an inferred unit may say `confirmed <decision>`), `state` (`current` or `plan`), `merged into <id>` for a merged unit, and `text`.
 - **KNOWN EXCLUDED:** units left off the page on purpose (linked, dropped, out of scope, secret), as id, subject and verdict, never a secret's text.
 
 - **PLANNED MEDIA** (only when the page links recordings): the recordings the plan says this page links, as id, file name and url.
@@ -29,6 +29,8 @@ Nothing else.
 - A statement whose subject is in KNOWN EXCLUDED is flagged as `[excluded]`: it was left off on purpose, so it must not be on the page (a link to where it stays is fine). That is how you tell a dropped value from an invented one: a statement matching no unit and no excluded subject is `[unsupported]`.
 
 **Media.** When PLANNED MEDIA is given, compare it with the links and mentions of recordings on the page, by **number and by name**: a recording listed but not linked is `[media]` absent; a link or a sentence about a recording that is not in the list (a "third video", a recording named for a deck the page does not have) is `[media]` unsupported. Without a PLANNED MEDIA list, a recording or video link on the page is `[media]` unsupported.
+
+**Links.** A SharePoint or OneDrive link on the page must be one the block's PLANNED MEDIA or UNITS name (or an inventory url the plan row lists); a SharePoint link you can't trace to any of them is `[unsupported]` ("link not traceable to a source row"), because it may have been built from a folder path.
 
 Use `search_wiki` or `get_page` only to check that a page the draft links exists; never to check a claim. Never ask for the sources. A linked page with `aiBlocked: true` is not read; report it as blocked.
 

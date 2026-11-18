@@ -28,7 +28,7 @@ Reading the results, by `source`:
 - Keyword hits and `get_page` results have no `url`: cite title and page id only, never build a link yourself.
 - **Ids in results** (a server that has them; an older one sends none): a wiki hit carries `page_id`, `book_id`, `chapter_id`, `revision_count` and `updated_at`, so a page already read can be told from a new one without `get_page` (a changed `revision_count` means it changed; the keyword fallback has no `revision_count`, compare `updated_at`). A OneDrive hit carries `ref` (`driveId:itemId`) and `lastModified`; `ref` is the handle for opening the file later.
 - `books: [ids]` searches only those books (an intersection with the books the caller can see); a scoped search has no OneDrive or GitHub hits.
-- Many searches at once: `sweep_wiki` (up to 15 queries, run three at a time on the server; pass the ids already judged as `known`). Never fan out parallel `search_wiki` calls. What a book or chapter holds: `list_pages` (`bookId` or `chapterId`; titles, revisions, `aiBlocked`).
+- Many searches at once: `sweep_wiki` (`queries: [{key, query, keywords?}]` with a distinct `key` per query, up to 15, run three at a time on the server; pass the ids already judged as `known`). Never fan out parallel `search_wiki` calls. What a book or chapter holds: `list_pages` (`bookId` or `chapterId`; titles, revisions, `aiBlocked`).
 
 ## AI-free pages: `no-ai`
 

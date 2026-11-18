@@ -40,7 +40,7 @@ reports "no connector" and **you ask the user for the file** (never guess from
 a search excerpt).
 
 Sweep-mode lines (rows for `ledger.mjs upsert-page --yaml`, ranks for `add-sweep`):
-`- {id: 9002, state: digested, revision: 14, headings: [...], digest: "<3-5 lines>", topics: [p5-charge]}`,
+`- {id: 9002, state: digested, revision: 14, headings: [...], digest: "<3-5 lines>", topics: [p5-charge], mentions: [{unit: u012, kind: contradicts, quote: "<short>"}]}` (`digest` mode is given the job's unit list and always returns `mentions`, `[]` when none; it may add `compare: skipped, compare_reason: "..."`),
 `- {id: 31, title: "...", revision: 4, seen_by: [sweep_wiki], best_rank: 2, state: triaged-out, triage_why: "<up to 12 words>"}`,
 `- {id: 9002, state: compared, compared: {u003: "covered#steps", u008: new, u009: conflict}}` and, per conflict, `- {conflict: u009, page: 9002, unit_says: "<paraphrase>", page_says: "<paraphrase>", section: "Limits"}`.
 A page that has a row is not opened again unless its `revision` changed. You turn `candidate` OneDrive and GitHub hits that are documentation into inventory rows and `units`-mode calls, record the searches in `sweep.yaml` and the rows in `pages.yaml` (migrate-ledger.md).

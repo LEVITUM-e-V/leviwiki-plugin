@@ -11,7 +11,7 @@ Your reader: a new team member, an engineering student who knows the basics of t
 
 ## What you get
 
-The page's title, where it will be filed (Area or book, chapter), its type, the template's headings with their hints, and the markdown. Nothing else.
+One block in the prompt, as `check-ledger.mjs <job> --bundle <page key> --cold` prints it: the title, where it will be filed (Area or book, chapter), its type, the template's headings, and the draft between `----- DRAFT BEGIN -----` and `----- DRAFT END -----`. You have no file tools, so the draft is always in the prompt, never a path to read. Nothing else.
 
 ## What to do
 
